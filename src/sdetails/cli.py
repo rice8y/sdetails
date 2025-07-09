@@ -365,7 +365,6 @@ class SlurmMonitor:
             for node in self.data:
                 allocated_cpu, idle_cpu, other_cpu, total_cpu = self.parse_cpu_info(node['cpu'])
                 used_gpu, total_gpu = self.parse_gpu_info(node['gres'], node['gres_used'])
-                queue_count = self.queue_counts.get(node['nodename'], 0)
                 
                 export_data.append({
                     'partition': node['partition'],
@@ -386,8 +385,7 @@ class SlurmMonitor:
                         'used': used_gpu,
                         'total': total_gpu,
                         'free': total_gpu - used_gpu
-                    },
-                    'running_jobs': queue_count
+                    }
                 })
             with open(filename, 'w', encoding='utf-8') as f:
                 json.dump({
