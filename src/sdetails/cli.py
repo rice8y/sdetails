@@ -22,7 +22,8 @@ class Colors:
 class SlurmMonitor:
     def __init__(self, use_color: bool = True):
         self.use_color = use_color
-        self.data = []
+        self.data: List[Dict] = []
+        self.queue_counts: Dict[str, int] = {}
 
     def colorize(self, text: str, color: str) -> str:
         if not self.use_color:
@@ -54,20 +55,34 @@ class SlurmMonitor:
             return Colors.GREEN
 
     def clear_screen(self):
-        """Clear the screen using ANSI escape codes for better compatibility"""
         print('\033[2J\033[H', end='', flush=True)
+
+    def fetch_queue_counts(self) -> None:
+        """Fetch the number of running jobs per partition."""
+        try:
+            result = subprocess.run(
+                ['squeue', '-h', '-o', '%P'], capture_output=True, text=True, check=True
+            )
+            parts = result.stdout.strip().split()
+            counts: Dict[str, int] = {}
+            for p in parts:
+                counts[p] = counts.get(p, 0) + 1
+            self.queue_counts = counts
+        except Exception:
+            self.queue_counts = {}
 
     def fetch_data(self) -> bool:
         try:
-            result = subprocess.run([
-                'sinfo', 
+            sinfo = subprocess.run([
+                'sinfo',
                 '--Format=Partition,NodeHost,StateCompact,CPUsState,AllocMem,Memory,Gres,GresUsed'
             ], capture_output=True, text=True, check=True)
-            lines = result.stdout.strip().split('\n')
+            lines = sinfo.stdout.strip().split('\n')
             if len(lines) < 2:
                 print("Error: Insufficient data from sinfo")
                 return False
-            
+
+            self.fetch_queue_counts()
             self.data = []
             for line in lines[1:]:
                 fields = line.split()
@@ -94,11 +109,7 @@ class SlurmMonitor:
         try:
             parts = cpu_str.split('/')
             if len(parts) == 4:
-                allocated = int(parts[0])
-                idle = int(parts[1])
-                other = int(parts[2])
-                total = int(parts[3])
-                return allocated, idle, other, total
+                return tuple(int(p) for p in parts)
         except ValueError:
             pass
         return 0, 0, 0, 0
@@ -106,21 +117,17 @@ class SlurmMonitor:
     def parse_gpu_info(self, gres: str, gres_used: str) -> Tuple[int, int]:
         try:
             total_gpu = 0
-            if gres and 'gpu:' in gres:
-                match = re.findall(r'gpu:(\d+)', gres)
-                if match:
-                    total_gpu = int(match[0])
+            if 'gpu:' in gres:
+                total_gpu = int(re.findall(r'gpu:(\d+)', gres)[0])
             used_gpu = 0
-            if gres_used and 'gpu:' in gres_used:
-                match = re.search(r'gpu:\(.*?\):(\d+)', gres_used)
-                if match:
-                    used_gpu = int(match.group(1))
+            if 'gpu:' in gres_used:
+                m = re.search(r'gpu:\(.*?\):(\d+)', gres_used)
+                if m:
+                    used_gpu = int(m.group(1))
                 else:
-                    match = re.findall(r'gpu:.*?:(\d+)', gres_used)
-                    if match:
-                        used_gpu = sum(int(m) for m in match)
+                    used_gpu = sum(int(x) for x in re.findall(r'gpu:.*?:(\d+)', gres_used))
             return used_gpu, total_gpu
-        except (ValueError, AttributeError):
+        except:
             return 0, 0
 
     def format_memory(self, mem_mb: int) -> str:
@@ -135,156 +142,110 @@ class SlurmMonitor:
         if not self.data:
             return
         total_nodes = len(self.data)
-        idle_nodes = sum(1 for node in self.data if 'idle' in node['state'].lower())
-        alloc_nodes = sum(1 for node in self.data if 'alloc' in node['state'].lower())
-        mix_nodes = sum(1 for node in self.data if 'mix' in node['state'].lower())
-        down_nodes = sum(1 for node in self.data if 'down' in node['state'].lower() or 'drain' in node['state'].lower())
-        total_cpus = sum(self.parse_cpu_info(node['cpu'])[3] for node in self.data)
-        idle_cpus = sum(self.parse_cpu_info(node['cpu'])[1] for node in self.data)
-        total_mem = sum(node['memory'] for node in self.data)
-        free_mem = sum(node['memory'] - node['allocmem'] for node in self.data)
-        total_gpus = 0
-        used_gpus = 0
-        for node in self.data:
-            used_gpu, total_gpu = self.parse_gpu_info(node['gres'], node['gres_used'])
-            total_gpus += total_gpu
-            used_gpus += used_gpu
+        idle_nodes = sum('idle' in n['state'].lower() for n in self.data)
+        alloc_nodes = sum('alloc' in n['state'].lower() for n in self.data)
+        mix_nodes = sum('mix' in n['state'].lower() for n in self.data)
+        down_nodes = sum(any(x in n['state'].lower() for x in ['down','drain']) for n in self.data)
+        total_cpus = sum(self.parse_cpu_info(n['cpu'])[3] for n in self.data)
+        idle_cpus = sum(self.parse_cpu_info(n['cpu'])[1] for n in self.data)
+        total_mem = sum(n['memory'] for n in self.data)
+        free_mem = sum(n['memory'] - n['allocmem'] for n in self.data)
+        total_gpus = used_gpus = 0
+        for n in self.data:
+            u, t = self.parse_gpu_info(n['gres'], n['gres_used'])
+            total_gpus += t; used_gpus += u
         free_gpus = total_gpus - used_gpus
+
         print(f"\n{self.colorize('=== Cluster Summary ===', Colors.BOLD + Colors.CYAN)}")
-        print(f"Nodes: {self.colorize(str(total_nodes), Colors.BOLD)} "
-              f"(Idle: {self.colorize(str(idle_nodes), Colors.GREEN)}, "
-              f"Mix: {self.colorize(str(mix_nodes), Colors.YELLOW)}, "
-              f"Allocated: {self.colorize(str(alloc_nodes), Colors.YELLOW)}, "
-              f"Down: {self.colorize(str(down_nodes), Colors.RED)})")
-        cpu_pct = idle_cpus/total_cpus*100 if total_cpus > 0 else 0
-        print(f"CPUs: {idle_cpus}/{total_cpus} available "
-              f"({self.colorize(f'{cpu_pct:.1f}%', self.get_usage_color(total_cpus-idle_cpus, total_cpus))})")
-        mem_pct = free_mem/total_mem*100 if total_mem > 0 else 0
-        print(f"Memory: {self.format_memory(free_mem)}/{self.format_memory(total_mem)} available "
-              f"({self.colorize(f'{mem_pct:.1f}%', self.get_usage_color(total_mem-free_mem, total_mem))})")
+        print(f"Nodes: {self.colorize(str(total_nodes), Colors.BOLD)} (Idle: {self.colorize(str(idle_nodes), Colors.GREEN)}, Mix: {self.colorize(str(mix_nodes), Colors.YELLOW)}, Alloc: {self.colorize(str(alloc_nodes), Colors.YELLOW)}, Down: {self.colorize(str(down_nodes), Colors.RED)})")
+        print(f"CPUs: {idle_cpus}/{total_cpus} available ({self.colorize(f'{idle_cpus/total_cpus*100:.1f}%', self.get_usage_color(total_cpus-idle_cpus, total_cpus))})")
+        print(f"Memory: {self.format_memory(free_mem)}/{self.format_memory(total_mem)} available ({self.colorize(f'{free_mem/total_mem*100:.1f}%', self.get_usage_color(total_mem-free_mem, total_mem))})")
         if total_gpus > 0:
-            gpu_pct = free_gpus/total_gpus*100
-            print(f"GPUs: {free_gpus}/{total_gpus} available "
-                  f"({self.colorize(f'{gpu_pct:.1f}%', self.get_usage_color(used_gpus, total_gpus))})")
-        print()
+            print(f"GPUs: {free_gpus}/{total_gpus} available ({self.colorize(f'{free_gpus/total_gpus*100:.1f}%', self.get_usage_color(used_gpus, total_gpus))})")
 
     def get_display_width(self, text: str) -> int:
-        clean_text = re.sub(r'\033\[[0-9;]*m', '', text)
-        return len(clean_text)
+        return len(re.sub(r'\033\[[0-9;]*m', '', text))
 
     def pad_text(self, text: str, width: int, align: str = 'left') -> str:
         display_width = self.get_display_width(text)
-        padding = width - display_width
-        if padding <= 0:
-            return text
-        if align == 'right':
-            return ' ' * padding + text
-        elif align == 'center':
-            left_pad = padding // 2
-            right_pad = padding - left_pad
-            return ' ' * left_pad + text + ' ' * right_pad
-        else:
-            return text + ' ' * padding
+        pad = width - display_width
+        if pad <= 0: return text
+        if align == 'right': return ' ' * pad + text
+        if align == 'center': return ' ' * (pad//2) + text + ' ' * (pad - pad//2)
+        return text + ' ' * pad
 
     def print_detailed_table(self, partition_filter: str = None, sort_by: str = 'nodename'):
         if not self.data:
             print("No data available")
             return
-        filtered_data = self.data
-        if partition_filter:
-            filtered_data = [node for node in self.data if node['partition'] == partition_filter]
-            if not filtered_data:
-                print(f"Partition '{partition_filter}' not found")
-                return
-        if sort_by == 'partition':
-            filtered_data.sort(key=lambda x: (x['partition'], x['nodename']))
-        elif sort_by == 'state':
-            filtered_data.sort(key=lambda x: (x['state'], x['nodename']))
-        elif sort_by == 'cpu':
-            filtered_data.sort(key=lambda x: (self.parse_cpu_info(x['cpu'])[1], x['nodename']), reverse=True)
-        else:
-            filtered_data.sort(key=lambda x: x['nodename'])
-        headers = ["Partition", "NodeName", "State", "CPU (Free/Total)", "Memory (Free/Total)", "GPU (Used/Total)"]
-        col_widths = [len(h) + 2 for h in headers]
-        for node in filtered_data:
-            allocated_cpu, idle_cpu, other_cpu, total_cpu = self.parse_cpu_info(node['cpu'])
-            used_gpu, total_gpu = self.parse_gpu_info(node['gres'], node['gres_used'])
-            free_mem_gb = (node['memory'] - node['allocmem']) // 1024
-            total_mem_gb = node['memory'] // 1024
-            partition_len = len(node['partition']) + 2
-            nodename_len = len(node['nodename']) + 2
-            state_len = len(node['state']) + 2
-            cpu_len = len(f"{idle_cpu}/{total_cpu}") + 2
-            mem_len = len(f"{free_mem_gb}G/{total_mem_gb}G") + 2
-            gpu_len = len(f"{used_gpu}/{total_gpu}" if total_gpu > 0 else "N/A") + 2
-            col_widths[0] = max(col_widths[0], partition_len)
-            col_widths[1] = max(col_widths[1], nodename_len)
-            col_widths[2] = max(col_widths[2], state_len)
-            col_widths[3] = max(col_widths[3], cpu_len)
-            col_widths[4] = max(col_widths[4], mem_len)
-            col_widths[5] = max(col_widths[5], gpu_len)
-        header = "┌" + "┬".join("─" * w for w in col_widths) + "┐"
-        separator = "├" + "┼".join("─" * w for w in col_widths) + "┤"
-        footer = "└" + "┴".join("─" * w for w in col_widths) + "┘"
-        print(header)
-        header_row = "│"
-        for header_text, width in zip(headers, col_widths):
-            header_row += self.pad_text(header_text, width) + "│"
-        print(header_row)
-        print(separator)
-        for node in filtered_data:
-            allocated_cpu, idle_cpu, other_cpu, total_cpu = self.parse_cpu_info(node['cpu'])
-            used_gpu, total_gpu = self.parse_gpu_info(node['gres'], node['gres_used'])
-            free_mem_gb = (node['memory'] - node['allocmem']) // 1024
-            total_mem_gb = node['memory'] // 1024
-            state_colored = self.colorize(node['state'], self.get_state_color(node['state']))
-            cpu_info = f"{idle_cpu}/{total_cpu}"
-            cpu_colored = self.colorize(cpu_info, self.get_usage_color(allocated_cpu, total_cpu))
-            mem_info = f"{free_mem_gb}G/{total_mem_gb}G"
-            mem_colored = self.colorize(mem_info, self.get_usage_color(node['allocmem'], node['memory']))
-            gpu_info = f"{used_gpu}/{total_gpu}" if total_gpu > 0 else "N/A"
-            gpu_colored = self.colorize(gpu_info, self.get_usage_color(used_gpu, total_gpu)) if total_gpu > 0 else "N/A"
-            row_data = [node['partition'], node['nodename'], state_colored, cpu_colored, mem_colored, gpu_colored]
-            row = "│"
-            for data, width in zip(row_data, col_widths):
-                row += self.pad_text(data, width) + "│"
-            print(row)
-        print(footer)
-        print(" * --- Default Partition")
-        print()
+        data = self.data if not partition_filter else [n for n in self.data if n['partition']==partition_filter]
+        if not data:
+            print(f"Partition '{partition_filter}' not found")
+            return
+        if sort_by == 'partition': data.sort(key=lambda x: (x['partition'], x['nodename']))
+        elif sort_by == 'state': data.sort(key=lambda x: (x['state'], x['nodename']))
+        elif sort_by == 'cpu': data.sort(key=lambda x: self.parse_cpu_info(x['cpu'])[1], reverse=True)
+        else: data.sort(key=lambda x: x['nodename'])
+
+        headers = ["Partition", "NodeName", "State", "CPU (Free/Total)", "Memory (Free/Total)", "GPU (Used/Total)", "Queue"]
+        col_widths = [len(h)+2 for h in headers]
+        rows = []
+        for n in data:
+            alloc, idle, other, total = self.parse_cpu_info(n['cpu'])
+            ug, tg = self.parse_gpu_info(n['gres'], n['gres_used'])
+            free_mem_g = (n['memory'] - n['allocmem'])//1024
+            total_mem_g = n['memory']//1024
+            q = self.queue_counts.get(n['partition'], 0)
+            row = [n['partition'], n['nodename'], n['state'], f"{idle}/{total}", f"{free_mem_g}G/{total_mem_g}G", (f"{ug}/{tg}" if tg>0 else "N/A"), str(q)]
+            rows.append(row)
+            for idx, cell in enumerate(row):
+                col_widths[idx] = max(col_widths[idx], len(cell)+2)
+
+        sep_line = lambda sep: sep.join('─'*w for w in col_widths)
+        header_line = '┌' + sep_line('┬') + '┐'
+        mid_sep = '├' + sep_line('┼') + '┤'
+        footer_line = '└' + sep_line('┴') + '┘'
+        print(header_line)
+        row_str = '│'
+        for h, w in zip(headers, col_widths): row_str += self.pad_text(h, w) + '│'
+        print(row_str)
+        print(mid_sep)
+        for row in rows:
+            row_str = '│'
+            for idx, cell in enumerate(row):
+                text = cell
+                if idx == 2:
+                    text = self.colorize(cell, self.get_state_color(cell))
+                if idx == 3:
+                    used = total - int(cell.split('/')[1])
+                    text = self.colorize(cell, self.get_usage_color(used, total))
+                if idx == 4:
+                    used_mem = total_mem_g*1024 - free_mem_g*1024
+                    text = self.colorize(cell, self.get_usage_color(used_mem, total_mem_g*1024))
+                if idx ==5 and tg>0:
+                    text = self.colorize(cell, self.get_usage_color(ug, tg))
+                row_str += self.pad_text(text, col_widths[idx]) + '│'
+            print(row_str)
+        print(footer_line)
+        print(" * --- Default Partition\n")
 
     def export_json(self, filename: str):
         try:
-            export_data = []
-            for node in self.data:
-                allocated_cpu, idle_cpu, other_cpu, total_cpu = self.parse_cpu_info(node['cpu'])
-                used_gpu, total_gpu = self.parse_gpu_info(node['gres'], node['gres_used'])
-                export_data.append({
-                    'partition': node['partition'],
-                    'nodename': node['nodename'],
-                    'state': node['state'],
-                    'cpu': {
-                        'allocated': allocated_cpu,
-                        'idle': idle_cpu,
-                        'other': other_cpu,
-                        'total': total_cpu
-                    },
-                    'memory': {
-                        'allocated_mb': node['allocmem'],
-                        'total_mb': node['memory'],
-                        'free_mb': node['memory'] - node['allocmem']
-                    },
-                    'gpu': {
-                        'used': used_gpu,
-                        'total': total_gpu,
-                        'free': total_gpu - used_gpu
-                    }
+            nodes = []
+            for n in self.data:
+                alloc, idle, other, total = self.parse_cpu_info(n['cpu'])
+                ug, tg = self.parse_gpu_info(n['gres'], n['gres_used'])
+                nodes.append({
+                    'partition': n['partition'],
+                    'nodename': n['nodename'],
+                    'state': n['state'],
+                    'cpu': {'allocated': alloc, 'idle': idle, 'other': other, 'total': total},
+                    'memory': {'allocated_mb': n['allocmem'], 'total_mb': n['memory'], 'free_mb': n['memory']-n['allocmem']},
+                    'gpu': {'used': ug, 'total': tg, 'free': tg-ug},
+                    'queue': self.queue_counts.get(n['partition'], 0)
                 })
             with open(filename, 'w', encoding='utf-8') as f:
-                json.dump({
-                    'timestamp': datetime.now().isoformat(),
-                    'nodes': export_data
-                }, f, indent=2, ensure_ascii=False)
+                json.dump({'timestamp': datetime.now().isoformat(), 'nodes': nodes}, f, indent=2, ensure_ascii=False)
             print(f"Data exported to {filename}")
         except Exception as e:
             print(f"Error: JSON export failed: {e}")
