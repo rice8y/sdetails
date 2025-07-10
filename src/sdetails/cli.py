@@ -265,7 +265,8 @@ class SlurmMonitor:
             return
         filtered_data = self.data
         if partition_filter:
-            filtered_data = [node for node in self.data if node['partition'] == partition_filter]
+            
+            filtered_data = [node for node in self.data if node['partition'].split('*')[0] == partition_filter]
             if not filtered_data:
                 print(f"Partition '{partition_filter}' not found")
                 return
