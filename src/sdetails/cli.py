@@ -340,8 +340,6 @@ class SlurmMonitor:
 
             if node['state'].endswith('*'):
                 self.automatic_flag = True
-            else:
-                self.automatic_flag = False
             
             state_colored = self.colorize(node['state'], self.get_state_color(node['state']))
             cpu_info = f"{idle_cpu}/{total_cpu}"
