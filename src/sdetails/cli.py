@@ -27,6 +27,7 @@ class SlurmMonitor:
         self.queued_counts = {}
         self.queued_by_partition = {}
         self.multi_partitions = set()
+        self.automatic_flag = False
 
     def colorize(self, text: str, color: str) -> str:
         if not self.use_color:
@@ -336,6 +337,11 @@ class SlurmMonitor:
                 queued_count = self.queued_by_partition.get(node['nodename'], 0)
                 marker = ''
             jobs_str = f"{running_count}/{queued_count}{marker}"
+
+            if node['state'].endswith('*'):
+                self.automatic_flag = True
+            else:
+                self.automatic_flag = False
             
             state_colored = self.colorize(node['state'], self.get_state_color(node['state']))
             cpu_info = f"{idle_cpu}/{total_cpu}"
@@ -355,9 +361,11 @@ class SlurmMonitor:
                 row += self.pad_text(data, width) + "│"
             print(row)
         print(footer)
-        print(" * --- Default Partition")
+        print(" *   --- Default Partition  ")
         if self.multi_partitions:
-            print(" ** --- Queued job counts for this partition reflect the total before jobs are assigned to individual nodes")
+            print(" **  --- Queued job counts for this partition reflect the total before jobs are assigned to individual nodes")
+        if self.automatic_flag:
+            print(' (*) --- In Node States, a trailing "*" indicates the node was automatically set (e.g., drain*, down*)')
         print()
 
     def export_json(self, filename: str):
