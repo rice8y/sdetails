@@ -4,12 +4,20 @@ SDetails is a Python-based CLI utility designed to improve the visibility of SLU
 
 ## Installation
 
-You can install this CLI tool using `uv` in two different ways:
+You can install this CLI tool using `uv` or `pip` in a few different ways:
 
 ### A. Install directly from GitHub (recommended)
 
+Using `uv`:
+
 ```bash
 uv tool install git+https://github.com/rice8y/sdetails.git
+```
+
+Or using `pip`:
+
+```bash
+pip install git+https://github.com/rice8y/sdetails.git
 ```
 
 This will fetch and install the latest version directly from the repository.
@@ -28,10 +36,12 @@ git clone https://github.com/rice8y/sdetails.git
 cd sdetails
 ```
 
-3. Install the package in editable mode using `uv tool`:
+3. Install the package in editable mode using `uv tool` (or `pip`):
 
 ```bash
 uv tool install -e .
+# or
+pip install -e .
 ```
 
 This is useful if you plan to modify the code locally.
